@@ -1,0 +1,968 @@
+---
+title: "Summative Assignmnet 2 - MY472"
+author: '202326921'
+date: "7 December 2023"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+# Table of Contents
+
+1. [Exercise 1](#exercise-1)
+2. [Exercise 2](#exercise-2)
+    - [Subsection 1](#subsection-1)
+    - [Subsection 2](#subsection-2)
+    - [Subsection 3](#subsection-3)
+    - [Subsection 4](#subsection-4)
+3. [Exercise 3](#exercise-3)
+    - [Subsection 1](#subsection-1)
+    - [Subsection 2](#subsection-2)
+4. [Exercise 4](#exercise-4)
+    - [Subsection 1](#subsection-1)
+    - [Subsection 2](#subsection-2)
+5. [Exercise 5](#exercise-5)
+    - [Subsection 1](#subsection-1)
+    - [Subsection 2](#subsection-2)
+
+
+In this assignment we will follow the same steps that a data scientists may encounter in the real world: from data collection to the analysis of it. The different exercises will cover various steps in the process.
+More precisely, we are going to use a local relational database to store different but related tables that we collect and may want to combine in various ways. We will ensure that each table within our database can be joined to every other table using a primary key. 
+
+
+# Exercise 1 {#exercise-1}
+
+We will start by creating an empty local relational database. EXPLANATIONS
+
+
+```{r setup, include=FALSE}
+# We will first load all the packages that we need for this assignment 
+# We call 'suppresWarnings()' to omit the warnings in the knitted document
+suppressWarnings(library('DBI'))
+suppressWarnings(library('RSQLite'))
+library('rvest')
+library('dplyr')
+library('stringr')
+library('RSelenium')
+library('httr')
+library('jsonlite')
+library('tidycensus')
+library('tidyverse')
+library('ggplot2')
+library('ggrepel')
+library('tigris')
+library('tmap')
+library('sf') 
+```
+
+```{r, echo=TRUE}
+#We create the path to a SQLite database file
+mydatabase <- "./database/mydatabase.sqlite"
+
+#We create the connection to this database
+connection <- dbConnect(RSQLite::SQLite(), mydatabase)
+
+#We check for the existence of the relational database
+if (file.exists(mydatabase)) {
+  print("Database file exists.")
+} else {
+  print("Error: Database file not found.")
+}
+```
+
+# Exercise 2 {#exercise-2}
+
+## Part a. Gathering structured data {#subsection-1}
+
+In this exercise we will retrieve using an automatic webscrapping function information of all R1 and R2 (Very High Research Activity and High Research Activity, respectively) Research Universities in the United States of America. We will do so, using information that can be found on [Wikipedia](https://en.wikipedia.org/wiki/List_of_research_universities_in_the_United_States). 
+
+The final goal is to construct a table that stores this information, with 5 specific variables: 
+
+1) The university’s name
+2) It’s status (public or private)
+3) The city in which it is located
+4) The state in which it is located
+5) The URL of the university’s dedicated Wikipedia page
+
+The first step is to read the html code from the website we want to scrape using the `read_html()` function. 
+
+DUDA: tengo que incluir el link para el url en la funcion??? - PREGUNTA PARA TODOS LOS EXERCISES 
+```{r, eval=FALSE}
+#We determine the website from where we want the data
+url <- "https://en.wikipedia.org/wiki/List_of_research_universities_in_the_United_States"
+html_content <- read_html(url)
+class(html_content)
+
+#We construct the function
+getstructdata <- function(html){
+  #We retrieve the information for the R1 and R2 universities
+  r1universities <- html_elements(html_content, css = '#mw-content-text >             div.mw-content-ltr.mw-parser-output > table:nth-child(19)') 
+  
+  r2universities <- html_elements(html_content, css = '#mw-content-text > div.mw-content-ltr.mw-parser-output > table:nth-child(27)') 
+  
+  #We transform them into a tibble
+  r1universities <- html_table(r1universities[[1]], fill=TRUE)
+  r2universities <- html_table(r2universities[[1]], fill=TRUE)
+  
+  #We combine the universities information in one table
+  dataunis <- bind_rows(r1universities, r2universities)
+  length(dataunis)
+  class(dataunis)
+  dataunis
+  
+  #We get the URLS for the universities
+  r1university_urls <- html_attr(html_nodes(html_content, '#mw-content-text > div.mw-content-ltr.mw-parser-output > table:nth-child(19) tr td:first-child a'), "href")
+  # Get target of hyperlink
+  r1university_urls <- paste("https://en.wikipedia.org",  r1university_urls, sep = "")
+  
+  r2university_urls <- html_attr(html_nodes(html_content, '#mw-content-text > div.mw-content-ltr.mw-parser-output > table:nth-child(27) tr td:first-child a'), "href")
+  r2university_urls <- paste("https://en.wikipedia.org",  r2university_urls, sep = "")
+
+  #We combine the URLs in one column
+  dataunis_urls <- c(r1university_urls, r2university_urls)
+  
+  #We combine everything into one table
+  dataunis$urls <- dataunis_urls
+  
+  #We change the names and eliminate the column that we don't need
+  dataunis <- dataunis %>% select(-'...5')
+  colnames(dataunis) <- c('university', 'status', 'city', 'state', 'url')
+  
+  return(dataunis)
+}
+
+dataunis <- getstructdata(html_content)
+print(dataunis)
+```
+## Part b. Gathering unstructured data {#subsection-2}
+
+We will create a new function that navigates to the Wikipedia pages of each university. Now, we will capture three different variables: 
+
+1) The geographic coordinates of the (main) university campus
+2) The endowment of the university in USD dollars
+3) The total number of students (including both undergraduate and postgraduate)
+```{r, eval=FALSE}
+# Create a new function to obtain more information about each university
+getunstructdata <- function(data) {
+  
+  # Initialize vectors to store data
+  coordinates <- character()
+  endowment <- numeric()
+  undergraduates <- numeric()
+  postgraduates <- numeric()
+  students <- numeric()
+    
+  #We create a loop to iterate over all the universities' urls
+  for(i in seq_len(nrow(data))){
+    
+    # Obtain relevant link element for the current laureate's name
+    current_url <- data$url[i]  
+    
+    # Load page
+    current_html <- read_html(current_url)
+    
+    # Get labels and information of those
+    labels <- current_html %>% html_elements(css = ".infobox-label") %>% html_text()
+    info <- current_html %>% html_elements(css = ".infobox-data") %>% html_text()
+    
+    # Extract specific information and clean it 
+    #Coordinates
+    coordinates_node <- html_nodes(current_html, css = 'span.geo-dec')[1]
+    coordinates[i] <- if (length(coordinates_node) > 0) {
+    coordinates_node %>% html_text()
+    } else {
+      NA  # or any other placeholder value for missing data
+    }
+    
+    #Endowment
+    endowment_text <- info[labels == 'Endowment']
+    endowment[i] <- if (length(endowment_text) > 0) {
+      numeric_value <- as.numeric(str_extract(endowment_text, "\\d+\\.?\\d*"))
+      unit_text <- str_extract(endowment_text, "(billion|million)")
+      
+      if (!is.na(unit_text)) {
+        if (unit_text == "billion") {
+          numeric_value <- numeric_value * 1000
+        }
+      }
+      
+      # Round to remove decimals
+      numeric_value <- round(numeric_value)
+      
+      numeric_value
+    } else {
+      NA
+    }
+    
+    
+    #Students - Students, Postgraduates and Undergraduates
+    students_text <- info[labels == 'Students']
+    if (length(students_text) > 0) {
+      students_values <- as.numeric(gsub('\\[\\D*\\d+\\]|\\([^)]*\\d*\\)|\\[\\D*\\d*\\]$', '', gsub(",", "", students_text)))
+      students[i] <- tail(students_values,1)
+    } else {
+      students[i] <- NA  
+    }
+    
+    undergraduates_text <- info[labels == 'Undergraduates']
+    if (length(undergraduates_text) > 0) {
+      undergraduates_values <- as.numeric(gsub('\\[\\D*\\d+\\]|\\([^)]*\\d*\\)|\\[\\D*\\d*\\]$', '', gsub(",", "", undergraduates_text)))
+      undergraduates[i] <- tail(undergraduates_values,1)
+    } else {
+      undergraduates[i] <- NA  
+    }
+    
+    postgraduates_text <- info[labels == 'Postgraduates']
+    if (length(postgraduates_text) > 0) {
+      postgraduates_values <- as.numeric(gsub('\\[\\D*\\d+\\]|\\([^)]*\\d*\\)|\\[\\D*\\d*\\]$', '', gsub(",", "", postgraduates_text)))
+      postgraduates[i] <- tail(postgraduates_values,1)
+    } else {
+      postgraduates[i] <- NA  
+    }
+    
+    if (!is.na(undergraduates[i]) & !is.na(postgraduates[i])) {
+      students[i] <- sum(postgraduates[i], undergraduates[i])
+    } else if (!is.na(undergraduates[i]) & is.na(postgraduates[i])) {
+      students[i] <- undergraduates[i]
+    } else if (is.na(undergraduates[i]) & !is.na(postgraduates[i])) {
+      students[i] <- postgraduates[i]
+    } else {
+      students[i] <- students[i]  
+    }
+    
+  }
+  
+  # Add the columns to the existing table
+  dataunis$coordinates <- coordinates
+  dataunis$endowment <- endowment
+  dataunis$students <- students  
+
+return(dataunis)
+
+}
+
+dataunis <- getunstructdata(dataunis)
+print(dataunis)
+```
+
+## Part c. Data munging {#subsection-3}
+
+For the following part, we are going to focus only on the subset of US universities that are known as the "Ivy League". 
+First of all, we will get information for those and we will create three new variables in the table that we already have. These will be: 
+
+1) An indicator for whether the university is an Ivy League institution
+2) The university’s county 
+3) The university’s EIN
+
+```{r, eval=FALSE}
+#We first read the csv file with the information
+ivyleague <- read.csv('ivyleague.csv')
+
+# We indicate the Ivy League universities. 
+# First, we create a new variable called 'university' to be able to merge both data sets. Then, we shape the database as we want it, and we keep only the variables that we are interested in before merging it with 'dataunis'.
+ivyleague$university <- c('University of Pennsylvania', 'Brown University', 'Columbia University', 'Cornell University', 'Dartmouth College', 'Harvard University', 'Princeton University', 'Yale University')
+ivyleague$county <- paste(ivyleague$county, ivyleague$state, sep = ', ')
+ivyleague$ivyleague <- 1
+ivyleague <- subset(ivyleague, select = -c(uni_name, state))
+
+# We merge both tables
+dataunis <- merge(dataunis, ivyleague, by = 'university', all.x = TRUE)
+
+# We generate the indicator for the Ivy League universities. 1 for those which are part of it, and 0 for those which are not 
+dataunis$ivyleague <- ifelse(is.na(dataunis$ivyleague), 0, dataunis$ivyleague)
+
+```
+
+## Part d. Writing to your relational database{#subsection-4}
+
+By now, we have a table in a tidy format, where every row is a unique university and each column is a variable. In total, we count with 11 different variables. 
+The last step is to write this table to the relational database created in the beginning of the assignment. The primary key is the university name. 
+We will also write a function that checks for the existence and correct dimensionality of the table. 
+
+```{r, eval=FALSE}
+# We write the table to the database
+dbWriteTable(connection, "datauniversities", dataunis, overwrite = TRUE, keys='universy')
+```
+
+SPLITTING
+
+```{r, echo=TRUE}
+# Creating a function to test for the existence and dimensionality of the table
+check_table <- function(inputdatabase, inputtable) {
+  
+  if(file.exists(paste0("./database/",inputdatabase))){
+    
+    database <- paste0("./database/",inputdatabase)
+    con <- dbConnect(RSQLite::SQLite(), database)
+    
+      if (inputtable %in% dbListTables(con)) {
+        # Read the table into R
+        table_data <- dbReadTable(con, inputtable)
+        cat('Number of rows:', nrow(table_data),'\nNumber of columns:', ncol(table_data),'\nDifferent variables in the table:', paste(colnames(table_data), collapse = ', '),'\n')
+        dbDisconnect(con)
+        
+      } else {
+        cat("Error: Table not found in file.")
+      }
+  }
+  else{
+    print("Error: File not found in folder.")
+  }
+} 
+
+# We check it
+check_table('mydatabase.sqlite', 'datauniversities')
+```
+
+# Exercise 3 {#exercise-3}
+
+In this exercise we are going to explore the [Academic Ranking of World Universities](https://www.shanghairanking.com/)
+
+
+## a. Scraping annual rank {#subsection-1}
+
+First, we will create a webscraper that returns for the Ivy League university only: 
+1) The ARWU ranking for the university for the years 2003, 2013, and 2023. If the university’s rank is given as a range e.g. 76-100, we convert this to the midpoint of the range – in this case 88.
+```{r, eval=FALSE}
+# First, we create a table when we are going to store the results
+rankingsuniversities <- data.frame(university = rep(c('University of Pennsylvania', 'Brown University', 'Columbia University', 'Cornell University', 'Dartmouth College', 'Harvard University', 'Princeton University', 'Yale University'), each = 3), year = rep(c(2003, 2013, 2023), times = 8), ranking = NA)
+
+get_rankings <- function(const_name, sec = 4){
+  
+  # 1. Setup -----------------------------
+  # We establish the website  
+  url <- 'https://www.shanghairanking.com/rankings/arwu/2023'
+  
+  # We start the Selenium server:
+  rD <- rsDriver(browser=c("firefox"), verbose = F, port = netstat::free_port(random = TRUE), chromever = NULL) 
+  driver <- rD[["client"]] 
+  
+  # Navigate to the selected URL address
+  driver$navigate(url)
+  
+  # Wait for the page to load
+  Sys.sleep(3)
+  
+  # 2. Search ----------------------------------------
+  for (i in seq(nrow(rankingsuniversities))) {
+    
+      #First, the year
+      # 1. identify the node for input
+      search_year <- driver$findElement(using = 'class', value = 'year-bg')
+      search_year$clickElement()
+      
+      # 2. Set the desired year directly
+      year_input <- driver$findElement(using = 'xpath', 
+      value = paste0('//*[@id="bar-content"]/div[1]/div/div[2]/ul/li[text()="', rankingsuniversities$year[i], '"]'))
+      year_input$clickElement()
+      
+      # Wait for the page to update
+      Sys.sleep(3)
+      
+      
+      #Second, the university
+      # 1. identify the node for input
+      search_university <- driver$findElement(using = 'class', value = 'search-input')
+      
+      # 2. send the name of the university and click 'enter'
+      # Get the university name from the data frame
+      university_name <- rankingsuniversities$university[i]
+      # Send the university name to the search input
+      search_university$sendKeysToElement(list(university_name, key = "enter"))  
+      
+      # Wait for the page to update
+      Sys.sleep(3)
+      
+      # 3. Extract results ----------------------------------------------------------
+      # We get the rankings
+      ranking <- driver$findElement(using = 'class', value = 'ranking')
+      ranking_text <- ranking$getElementText()[[1]]
+  
+      # Check if the ranking is a range
+      if (grepl("-", ranking_text)) {
+        # If it's a range, calculate the average
+        range_values <- as.numeric(strsplit(ranking_text, "-")[[1]])
+        ranking_position <- mean(range_values)
+      } else {
+        # If it's a single value, use that value
+        ranking_position <- as.numeric(floor(as.numeric(ranking_text)))
+      }
+      
+      # Store the ranking in the table
+      rankingsuniversities$ranking[i] <- ranking_position
+      
+      # Clear the search input for the next iteration
+      search_university$clearElement()
+  }
+  
+  return(rankingsuniversities)
+   
+# Stop RSelenium
+driver$close()
+driver$server$stop()
+} 
+
+# We check the output
+rankingsuniversities <- get_rankings()
+
+# We write this new table to our relational database 
+dbWriteTable(connection, "rankingsuniversities", rankingsuniversities, overwrite = TRUE, keys='university')
+```
+
+By the end, we should get a new table in tidy long format, where each row uniquely identifies a combination of university and year (e.g., Harvard-2003).
+
+Before continuing, we check for the existence and correct dimensionality this table using the function written in Exercise 2d.
+```{r, echo=TRUE}
+# We check the existence and dimensionality 
+check_table('mydatabase.sqlite', 'rankingsuniversities')
+```
+
+## b. Scraping subject ranks for 2023 {#subsection-2}
+
+We will create now a new webscraper that gathers for each Ivy League university only: 
+
+1) The rankings of the university for every social science for which the university has been ranked. Again, if a range is given, we take the midpoint.
+
+```{r, eval=FALSE}
+# First, we create a table when we are going to store the results
+rankingsuniversities_socialsciences <- data.frame(university = character(), subject = character(), ranking = integer(), stringsAsFactors = FALSE)
+
+# List of Ivy League universities
+ivyleague_universities <- c('University of Pennsylvania', 'Brown University', 'Columbia University','Cornell University', 'Dartmouth College', 'Harvard University','Princeton University', 'Yale University')
+
+get_ssrankings <- function(const_name, sec = 4){
+    
+  # 1. Setup -----------------------------
+  # We establish the website  
+  url <- 'https://www.shanghairanking.com/rankings/arwu/2023'
+  
+  # We start the Selenium server:
+  rD <- rsDriver(browser=c("firefox"), verbose = F, port = netstat::free_port(random = TRUE), chromever = NULL) 
+  driver <- rD[["client"]] 
+  
+  
+  # 2. Search ----------------------------------------
+  for (i in ivyleague_universities) {
+    
+    # Navigate to the selected URL address
+    driver$navigate(url)
+  
+    # Wait for the page to load
+    Sys.sleep(3)
+  
+    # First, the university
+    # 1. identify the node for input
+    search_university <- driver$findElement(using = 'class', value = 'search-input')
+      
+    # 2. send the name of the university and click 'enter'
+    # Send the university name to the search input
+    search_university$sendKeysToElement(list(i, key = "enter")) 
+    
+    # 3. Enter into the university profile
+    enter_university <- driver$findElement(using = 'class', value = 'univ-name')
+    enter_university$clickElement()
+
+    
+    # Second, the social sciences subjects
+    # 1. identify the node for input
+    search_year <- driver$findElement(using = 'class', value = 'rank-select')
+    search_year$clickElement()
+        
+    # 2. Set the desired type of subjects
+    subjects_input <- driver$findElement(using = 'xpath', 
+    value = '//*[@id="gras"]/div[2]/div[1]/div[1]/div[2]/div/div[2]/ul/li[6]')
+    subjects_input$clickElement()
+        
+    # Wait for the page to update
+    Sys.sleep(3)
+        
+    # 3. Extract results ----------------------------------------------------------
+    ssranking <- driver$findElement(using = 'class name', value = 'table-container')
+    results_html <- read_html(ssranking$getElementAttribute('innerHTML')[[1]])
+    results_table <- html_table(results_html)[[1]]
+        
+    # Adjust the ranks taking into account the ranges
+    for (row in 1:nrow(results_table)) {
+      raw_ranking <- as.character(results_table[row, "Rank"])
+      
+      if (grepl("-", raw_ranking)) {
+        ranking_values <- as.integer(strsplit(raw_ranking, "-")[[1]])
+        ranking_mean <- mean(ranking_values, na.rm = TRUE)
+      } else {
+        ranking_mean <- as.integer(raw_ranking)
+      }
+    
+      # Convert subject name to lowercase
+      subject <- tolower(as.character(results_table[row, "Subject"]))
+    
+        
+    # Extract data and append to the dataframe
+    rankingsuniversities_socialsciences <- rbind(
+      rankingsuniversities_socialsciences,
+      data.frame(university = i, subject = subject, ranking = ranking_mean))
+    }
+  }
+    
+  return(rankingsuniversities_socialsciences)
+   
+# Stop RSelenium
+driver$close()
+driver$server$stop()
+
+}
+
+# We check the output
+rankingsuniversities_socialsciences <- get_ssrankings()
+
+# We write this new table to our relational database 
+dbWriteTable(connection, "rankingsuniversities_socialsciences", rankingsuniversities_socialsciences, overwrite = TRUE, keys='university')
+```
+
+By the end, we should get a new table in tidy long format, where each row uniquely identifies a combination of university and discipline (e.g., Harvard-Economics).
+
+Lastly, we check for the existence and correct dimensionality of this table using the function written in Exercise 2d.
+```{r, echo=TRUE}
+# We check the existence and dimensionality 
+check_table('mydatabase.sqlite', 'rankingsuniversities_socialsciences')
+```
+
+# Exercise 4{#exercise-4}
+
+We are now going to gather a variety of additional data for each Ivy League university only from two APIs.
+
+## a. Gathering financial data from a raw API {#subsection-1}
+
+First, for each Ivy League university only we are going to gather financial data from the [ProPublica API](https://projects.propublica.org/nonprofits/api). Specifically, we want the following variables:
+
+1) Total revenue
+2) Total assets
+
+```{r, eval=FALSE}
+# We initialize an empty list to store data frames for each university
+result_list <- list()
+
+# We define the function 
+get_propublicadata <- function(const_name, sec=4){
+  
+  for (current_ein in ivyleague$ein) {
+    
+    # 1. Setup ------------------------------
+    # Searching endpoint URL and defining search terms
+    org_search_url <- paste0('https://projects.propublica.org/nonprofits/api/v2/organizations/', current_ein, '.json')
+    fromJSON(org_search_url)
+    
+    # 2. Search ----------------------------------------
+    # Building the API GET request
+    org_search <- GET(org_search_url, 
+                      query = list(fields = 'organization, filings_with_data'))
+                      
+    # parse the content returned from our GET request
+    json_org_search <- content(org_search, "parsed")
+    
+    # check which variables we have 
+    names(json_org_search) 
+    
+    # 3. Results --------------------------------------
+    # We select the data that we want from $filings_with_data
+    # Filter out 'pdf_url' and 'tax_pd' from each element of the list and bind them into a tibble
+    org_art <- do.call(rbind, lapply(json_org_search$filings_with_data, function(x) {
+      data <- x
+      # Remove 'pdf_url' and 'tax_pd' keys if they exist
+      if ("pdf_url" %in% names(data)) data$pdf_url <- NULL
+      if ("tax_pd" %in% names(data)) data$tax_pd <- NULL
+      as_tibble(data, stringsAsFactors = FALSE)
+    })) %>% select(c('ein','tax_prd_yr', 'totrevenue', 'totassetsend')) %>%
+       arrange(tax_prd_yr)
+    
+    # We determine the number of observations available
+    n_obs <- nrow(org_art)
+    
+    # Create a data frame for the current university
+    university_df <- data.frame(
+      university = rep(ivyleague$university[current_ein == ivyleague$ein], each = n_obs),
+      ein = rep(current_ein, each = n_obs),
+      year = rep(org_art$tax_prd_yr, each = 1),  
+      total_revenue = rep(org_art$totrevenue, each = 1),
+      total_assets = rep(org_art$totassetsend, each = 1)
+    )
+  
+    # Append the data frame to the result list
+    result_list[[length(result_list) + 1]] <- university_df
+  }
+  
+# Combine all data frames in the result list into a single data frame
+propublicadata_universities <- do.call(rbind, result_list)
+
+#We get the final table
+return(propublicadata_universities)
+}
+
+# We check the output
+propublicadata_universities <- get_propublicadata()
+
+# We write this new table to our relational database 
+dbWriteTable(connection, "propublicadata_universities", propublicadata_universities, overwrite = TRUE, keys='university')
+
+```
+
+By the end, we should get a new table in tidy long format, where each row uniquely identifies a combination of university and year (e.g., Harvard-2020).
+
+Lastly, we check for the existence and correct dimensionality of this table using the function written in Exercise 2d.
+```{r, echo=TRUE}
+# We check the existence and dimensionality 
+check_table('mydatabase.sqlite', 'propublicadata_universities')
+```
+
+## b. Gathering local economic data from a packaged API {#subsection-2}
+
+For the last part of this exercise, we are going to use the package 'tidycensus', which provides  a convenient front-end for access to the US Census Bureau’s API. First, we are going retrieve the names of all the Counties in the US and their estimated median household income for every county for both 2015 and 2020. We are going to use the American Community Survey. With this, we would like to construct a table that contains: 
+
+1) The name of the universities in the Ivy League
+2) The name of the County in which the campus is located 
+3) The estimated median household income for the County, for 2015 and for 2020. 
+
+```{r, eval=FALSE}
+# FIRST, WE RETRIEVE THE DATA FROM THE US CENSUS BUREAU’S API 
+# 1. Setup -------------------------
+# First of all, we set the key to access the information in the US Census Bureau API. COMMENT THAT WE CREATE IT USING THE CENSUS_API_KEY function and the Readenviron, and then we only leave this here
+Sys.getenv("CENSUS_API_KEY")
+
+# 2. Search ------------------------
+# We view the variables that we have in the dataset for both years
+v15 <- load_variables(2015, "acs5", cache = TRUE)  
+v20 <- load_variables(2020, "acs5", cache = TRUE)  
+
+# The variables that we want are 
+# For 2015 and 2020: B19013_001 - Median household income in the past 12 months (In the specific year inflation-adjusted dollars)
+
+# We create an empty dataframe to store the results
+datacensus <- data.frame()
+year = c(2015, 2020)
+
+# 3. Results ---------------------------
+#We elaborate a for loop to retrieve the data for years 2015 and 2020
+for(current_year in year){
+  current_data <- get_acs('api-key' = mykey, geography = 'county', variables = "B19013_001", year = current_year)  
+  current_data$year <- current_year
+  datacensus <- bind_rows(datacensus, current_data)
+}
+
+# We keep only the variables of interested and we modify the names
+datacensus <- datacensus %>% 
+  select(-c(GEOID, variable, moe)) %>%
+  rename(county = NAME, medianincome = estimate)
+
+# Print the modified dataframe
+print(datacensus)
+
+
+# SECOND, WE CREATE THE DESIRED TABLE
+# We include the data for the universities and counties that we want
+datacensus_universities <- ivyleague %>% select('county', 'university')
+
+# We give shape to the data frame
+datacensus_universities <- datacensus_universities %>%
+  mutate(medianincome = NA, year = NA)
+
+# We merge the information and keep what we want
+datacensus_universities <- left_join(datacensus_universities, datacensus, by = "county")
+datacensus_universities <- datacensus_universities %>% 
+  select(-c(medianincome.x, year.x)) %>%
+  rename(medianincome = medianincome.y, year = year.y)
+
+# Print the result dataframe
+# print(datacensus_universities)
+
+# We write this new table to our relational database 
+dbWriteTable(connection, "datacensus_universities", datacensus_universities, overwrite = TRUE)
+```
+
+By the end, we should get a new table in tidy long format, where each row uniquely identifies a combination of university and year (e.g., Harvard-2015).
+
+Lastly, we check for the existence and correct dimensionality of this table using the function written in Exercise 2d.
+```{r, echo = TRUE}
+# We check the existence and dimensionality 
+check_table('mydatabase.sqlite', 'datacensus_universities')
+
+```
+
+# Exercise 5 {#exercise-5}
+
+Once we have completed these exercises, we have five distinct tables in the created relational database. In this exercise we will bring together the information in a variety of ways using SQL, and then we will analyse the data using R. 
+
+## a. Analysis and visualization {#subsection-1}
+
+Using SQL, we will call into R from your relational database an analysis table that includes, for the Ivy League institutions only:
+
+1) University name
+2) The average rank of the university across 2003, 2013, and 2023
+3) The average rank of the university’s Economics, Political Science, and Sociology programs, if they were ranked
+4) The current endowment per student in USD
+5) The average total revenue per student across the years 2015 - 2020, in USD
+6) The average of the median household income for the County across the years 2015 and 2020, in USD
+```{r}
+# We open the connection once again
+connection <- dbConnect(RSQLite::SQLite(), mydatabase)
+
+# We get the information that we want for our analysis table 
+analysis_table <- dbGetQuery(connection, 'WITH 
+            "UniversityRankings" AS (
+                SELECT university,
+                AVG(ranking) AS average_rank
+                FROM rankingsuniversities
+                WHERE year IN (2003, 2013, 2023)
+                GROUP BY university
+            ),
+            "SocialSciencesRanks" AS (
+                SELECT university,
+                AVG(ranking) AS socialsciences_average_rank
+                FROM rankingsuniversities_socialsciences
+                WHERE subject IN ("economics", "political sciences", "sociology")
+                GROUP BY university
+            ),
+            "IvyLeagueEndowment" AS (
+                SELECT university,
+                endowment / students AS avg_endow_perstudent
+                FROM datauniversities
+                WHERE ivyleague = 1
+            ),
+            "TotalRevenuePerStudent" AS (
+                SELECT du.university,
+                AVG(ppd.total_revenue) / du.students AS avg_revenue_per_student
+                FROM datauniversities du
+                JOIN propublicadata_universities ppd ON du.university = ppd.university
+                WHERE ppd.year IN (2015, 2020)
+                GROUP BY du.university
+            ),
+            "MedianHouseholdIncome" AS (
+                SELECT university, 
+                AVG(medianincome) AS medianhouseholdincome
+                FROM datacensus_universities
+                WHERE year IN (2015, 2020)
+                GROUP BY university
+            )
+            SELECT 
+                ua.university,
+                ua.average_rank,
+                us.socialsciences_average_rank,
+                ud.avg_endow_perstudent,
+                ur.avg_revenue_per_student,
+                um.medianhouseholdincome
+            FROM 
+                UniversityRankings ua
+            JOIN 
+                SocialSciencesRanks us ON ua.university = us.university
+            JOIN 
+                IvyLeagueEndowment ud ON ua.university = ud.university
+            JOIN 
+                TotalRevenuePerStudent ur ON ua.university = ur.university
+            JOIN 
+                MedianHouseholdIncome um ON ua.university = um.university')
+
+```
+
+Once we have this information, we will generate four plots that show the relationships between: 
+
+1) Average university ranking and average Econ/PS/Soc ranking
+2) Average university ranking and endowment per student
+3) Average endowment per student and average median household income
+4) Average revenue per student and average median household income
+
+```{r}
+# Graph 1 -------------------------------------
+# Scatter plot - Relationship between the Overall rank of the universities and their Econ/PS/sociology average rank
+ggplot(analysis_table, aes(x = socialsciences_average_rank, y = average_rank, label = university)) +
+  geom_point(size = 3, color = "purple") +
+  geom_text_repel(box.padding = 1, segment.color = "grey", segment.size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.4, linetype = "dashed") +
+  labs(title = "Overall Rank vs Social Sciences Rank",
+       x = "Social Sciences Rank",
+       y = "University Overall Rank") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# Graph 2 -------------------------------------
+# Scatter plot
+# I think here it is better a bubble chart because Dartmouth is biasing the scatter plot a lot
+ggplot(analysis_table, aes(x = avg_endow_perstudent, y = average_rank, label = university)) +
+  geom_point(size = 3, color = 'purple') +
+  geom_text_repel(box.padding = 1, segment.color = "grey", segment.size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.4, linetype = "dashed") +
+  labs(title = "University Ranking vs. Endowment per Student",
+       x = "Endowment per Student (in million USD)",
+       y = "University Overall Rank") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# Graph 3 ------------------------------------- 
+# Scatter plot
+ggplot(analysis_table, aes(x = avg_endow_perstudent, y = medianhouseholdincome, label = university)) +
+  geom_point(size = 3, color = 'purple') +
+  geom_text_repel(box.padding = 1, segment.color = "grey", segment.size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.4, linetype = "dashed") +
+  labs(title = "Median Household Income vs Endowmnet per Student",
+       x = "Endowment per Student (in million USD)",
+       y = "Median Household Income") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# Graph 4 -------------------------------------
+# Scatter plot 
+ggplot(analysis_table, aes(x = avg_revenue_per_student, y = medianhouseholdincome, label = university)) +
+  geom_point(size = 3, color = 'purple') +
+  geom_text_repel(box.padding = 1, segment.color = "grey", segment.size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size = 0.4, linetype = "dashed") +
+  labs(title = "Average Revenue per Student",
+       x = "Average Revenue per Student",
+       y = "Median Household Income") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(labels = scales::dollar_format())+
+  scale_x_continuous(labels = scales::dollar_format())
+
+```
+
+### Analysis of the plots
+
+
+
+
+## b. Visualization of geographic data {#subsection-2}
+
+Using SQL, we will call into R from the relational database a table that includes, for every R1 and R2 university: 
+
+1) University name
+2) Geographic coordinates
+3) Status (public vs private)
+4) Whether the university is an Ivy League institution
+
+```{r}
+geographic_table <- dbGetQuery(connection, 'SELECT university, coordinates, status, ivyleague
+                               FROM datauniversities')
+
+```
+
+Once we have the table, we retrieve a [shapefile](https://en.wikipedia.org/wiki/Shapefile) of the United States using the 'tigris' package. With it, we create a visually clear and compelling map that is appropiately labelled which shows: 
+
+1) Every R1 and R2 university, excluding the Ivy League institutions, as a point
+2) Where the colour of the points varies by status (public vs. private)
+3) Ivy League universities as contrasting points
+
+
+```{r}
+# 1. Setup ----------------------------------------
+# Get state boundaries
+states <- tigris::states()
+plot(states$geometry)
+
+# Remove from our set the ones that we don't need 
+target_states <- states %>%
+  filter(!STUSPS %in% c("VI", "MP", "GU", "AS"))
+
+
+# 2. Adjust the variables -------------------------
+# COORDINATES
+# Extract numeric values for latitude and longitude
+geographic_table$latitude <- as.numeric(sub("([0-9.]+)°[NSEW].*", "\\1", geographic_table$coordinates))
+geographic_table$longitude <- as.numeric(sub(".*[NSEW] ([0-9.]+)°[NSEW]", "\\1", geographic_table$coordinates))
+
+# Assign the correct sign based on the directional indicators
+geographic_table$latitude <- ifelse(grepl("S", geographic_table$coordinates), -geographic_table$latitude, geographic_table$latitude)
+geographic_table$longitude <- ifelse(grepl("W", geographic_table$coordinates), -geographic_table$longitude, geographic_table$longitude)
+
+# Remove the NA rows
+geographic_table <- geographic_table[complete.cases(geographic_table), ]
+
+# Create an sf spatial object
+geographic_table <- st_as_sf(geographic_table, coords = c("longitude", "latitude"), crs = 4326)
+
+
+# IVYLEAGUE
+# Convert it to factor to be able to plot it 
+geographic_table$ivyleague <- factor(geographic_table$ivyleague, levels = c(0, 1), labels = c("Not Ivy League", "Ivy League"))
+
+#STATUS
+# Convert it to factor
+geographic_table$status <- factor(geographic_table$status)
+
+
+# 3. Create the map ----------------------
+# Create the mapping variables
+# Variable 1: Ivy League universities (Blue larger points)
+ivy_subset <- subset(geographic_table, ivyleague == "Ivy League")
+non_ivy_subset <- subset(geographic_table, ivyleague == "Not Ivy League")
+
+# Set the map
+tmap_options(check.and.fix = TRUE)
+tmap_mode("view")
+
+# Create the map
+tm_shape(target_states) +
+  tm_borders(lwd = 0.2) +
+  # Add the Ivy League universities
+  tm_shape(ivy_subset) +
+  tm_dots(border.col = "yellow", border.lwd = 5, col = "red", size = 0.3) +
+  # Add the non Ivy League universities
+  tm_shape(non_ivy_subset) +
+  tm_dots(col = "status", size = 0.05, palette = c("Private (non-profit)"='red', "Public"='lightblue')) +
+  # Add the legend
+  tm_layout(legend.position = c("right", "top"))
+
+
+# As a last step and good practice, we end the connection that we created in the first exercise
+dbDisconnect(connection)
+
+```
+
+### Analysis of the map's results  
+
+
+## Appendix
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE} 
+
+```
+#DOUBTS TO SOLVE BEFORE SUBMITTING
+1) Set up - Line 20
+2b) NAs in 2b. - I believe coordinates and endowment is just missing in wiki. But we need to clean the data for the students (see how I can add undergrad and postgrad for all campuses - condition?)
+
+I have 9 universities missing, different cases: 
+  A) Kent State University, Ohio State University, Ohio University, Wright State University: (all campuses). To do with the selector to get what says 'all campuses'
+  B) Pennsylvania State University - unique case
+  C) University of South Carolina - To do with the selector for those saying 'System wide'
+  D) Washington State University - unique case 
+  E) Air Force Institute of Technology Graduate School - Does not have - check if i can include them manually 
+  F) Claremont Graduate University - special case
+  
+  
+2b) See how I can add billion/million to the endowment
+2c) The best manner to detect the universities is to create a new variable in Ivileague dataset with the complete names? - Nothing more efficient? 
+2c) Should I get everything NAs for the countys of the not ivyleague universities?
+2d) Should I disconnect the connection in this step or in the end of the assignment? Makes it sense then to open the connection always when checking for the existence of tables in the file?
+3) Check why the numbers are still with decimals 
+3) in general could i get a different url(being already inside of the rankings part of the website) or i need to use the one that they give to us
+
+4a) Should I do a function here as well? 
+4a) See if there is any manner of putting NA in the year for which we don't have informationCornell is missing 2011
+Dartmouth is missing 2021
+Harvard is missing 2020
+Princeton is missing 2021
+Yale is missing 2021
+General) When saying to include only the call to the function, they refer to the function created everytime of the function that does the check. I think they may refer to the check because we need to call the function first to assign it to a variable that creates the table.. ? Review for the exercises 
+
+4b) Compare the installation of the key. How do you do it with tidycensus? I had this:
+
+
+4b) Compare that we are getting the same variables for the median household income
+4) See if people are also doing functions in this exercise, because it is not requested
+1-5) Make sure that everythings runs only once when knitting. Eval = TRUE ?
+5a) I am saving dataunis as 'datauniversities' in my connection. Check to align 
+5a) When I join the last table talking about the medianhouseholdincome per county, I miss the county in the finaltable - Don't think it is important but double check 
+1-5) Putting 'key' on the dbWriteTable ??? 
+5b) Check if we need the library 'sf'
+1-5) Put everything with shape. Setup, Search, Results....
+1) En dataunis, multiplicar el endowment por billion/million
+5b) Check the legend in the interactive map 
+5b) Cambiar shape for ivyleague
+5a) Adjust the scales in the labels with the dollars 
